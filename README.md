@@ -34,3 +34,6 @@ We’ve built in the most requested systems to reduce script load and improve se
 BG HUD is more than just an interface—it’s the freedom to choose how you see the game. Give your players the flexibility they deserve.
 
 Available now! Don’t settle for basic; upgrade your server style with BG HUD.
+
+
+** Build with visual studio code terminal : cd web,  pnpm i, pnpm build **
