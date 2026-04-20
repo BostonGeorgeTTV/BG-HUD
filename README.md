@@ -2,6 +2,8 @@
 
 <img width="1376" height="768" alt="bg_hud" src="https://github.com/user-attachments/assets/3e14ac3e-60d1-48f7-9860-4a3b3d9efda5" />
 
+https://www.youtube.com/watch?v=Q2BujYBkCPE
+
 Elevate your FiveM server with BG HUD, the script that blends modern design, extreme customization, and essential features into one high-performance package.
 
 🎨 Full In-Game Customization
