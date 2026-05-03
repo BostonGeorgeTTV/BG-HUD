@@ -1,6 +1,6 @@
 local ESX = nil
 local QBCore = nil
-local Framework = 'standalone'
+local Framework = 'auto' -- Detected automatically, can be overridden by setting HudMileage.framework to 'ESX', 'QBCore', 'Qbox', or 'standalone'
 
 local pauseMenuHidden = false
 
@@ -102,21 +102,64 @@ local function setupFramework()
     Framework = detectFramework()
 
     if Framework == 'ESX' then
+        if GetResourceState('es_extended') ~= 'started' and GetResourceState('es_extended') ~= 'starting' then
+            return false
+        end
+
         local ok, object = pcall(function()
             return exports['es_extended']:getSharedObject()
         end)
 
-        if ok then
+        if ok and object then
             ESX = object
+            return true
         end
+
+        -- Fallback for older ESX versions that do not expose getSharedObject as an export
+        TriggerEvent('esx:getSharedObject', function(object)
+            ESX = object
+        end)
+
+        return ESX ~= nil
     elseif Framework == 'QBCore' or Framework == 'Qbox' then
+        local resourceName = Framework == 'Qbox' and 'qbx_core' or 'qb-core'
+
+        if GetResourceState(resourceName) ~= 'started' and GetResourceState(resourceName) ~= 'starting' then
+            return false
+        end
+
         local ok, object = pcall(function()
+            if Framework == 'Qbox' and exports['qbx_core'] and exports['qbx_core'].GetCoreObject then
+                return exports['qbx_core']:GetCoreObject()
+            end
+
             return exports['qb-core']:GetCoreObject()
         end)
 
-        if ok then
+        if ok and object then
             QBCore = object
+            return true
         end
+
+        return false
+    end
+
+    return Framework == 'standalone'
+end
+
+local function ensureFrameworkReady()
+    if Framework == 'auto' or Framework == 'standalone' then
+        setupFramework()
+        return
+    end
+
+    if Framework == 'ESX' and not ESX then
+        setupFramework()
+        return
+    end
+
+    if (Framework == 'QBCore' or Framework == 'Qbox') and not QBCore then
+        setupFramework()
     end
 end
 
@@ -436,15 +479,19 @@ local function getQBPlayerData()
 end
 
 local function isPlayerLoaded()
+    ensureFrameworkReady()
+
     if Framework == 'ESX' then
-        if ESX and type(ESX.IsPlayerLoaded) == 'function' then
+        if not ESX then return false end
+
+        if type(ESX.IsPlayerLoaded) == 'function' then
             local ok, loaded = pcall(ESX.IsPlayerLoaded)
             if ok then
                 return loaded == true
             end
         end
 
-        return ESX and ESX.PlayerLoaded == true
+        return ESX.PlayerLoaded == true
     elseif Framework == 'QBCore' or Framework == 'Qbox' then
         if LocalPlayer and LocalPlayer.state and LocalPlayer.state.isLoggedIn ~= nil then
             return LocalPlayer.state.isLoggedIn == true
@@ -457,27 +504,81 @@ local function isPlayerLoaded()
     return true
 end
 
+local function normalizeStatusValue(value)
+    value = tonumber(value)
+    if not value then return nil end
+
+    -- esx_status normally stores values from 0 to 1,000,000. Some custom status scripts use 0-100.
+    if value > 100 then
+        value = value / 10000
+    end
+
+    return math.max(0, math.min(100, value))
+end
+
+local function getESXStatusPercent(status)
+    if not status then return nil end
+
+    if type(status) == 'number' then
+        return normalizeStatusValue(status)
+    end
+
+    if type(status) ~= 'table' then
+        return nil
+    end
+
+    if status.percent ~= nil then
+        return normalizeStatusValue(status.percent)
+    end
+
+    if type(status.getPercent) == 'function' then
+        local ok, percent = pcall(function()
+            return status:getPercent()
+        end)
+
+        if ok and percent ~= nil then
+            return normalizeStatusValue(percent)
+        end
+    end
+
+    return normalizeStatusValue(status.val or status.value)
+end
+
+local function applyESXStatus(name, status)
+    local percent = getESXStatusPercent(status)
+    if percent == nil then return false end
+
+    if name == 'hunger' then
+        playerStatus.hunger = percent
+        return true
+    elseif name == 'thirst' then
+        playerStatus.thirst = percent
+        return true
+    elseif name == 'stress' then
+        playerStatus.stress = percent
+        return true
+    end
+
+    return false
+end
+
 local function refreshNeedsFromESXStatus()
     local found = false
 
     TriggerEvent('esx_status:getStatus', 'hunger', function(status)
-        found = true
-        if status then
-            playerStatus.hunger = (status.val or 0) / 10000
+        if applyESXStatus('hunger', status) then
+            found = true
         end
     end)
 
     TriggerEvent('esx_status:getStatus', 'thirst', function(status)
-        found = true
-        if status then
-            playerStatus.thirst = (status.val or 0) / 10000
+        if applyESXStatus('thirst', status) then
+            found = true
         end
     end)
 
     TriggerEvent('esx_status:getStatus', 'stress', function(status)
-        if status then
-            playerStatus.stress = (status.val or 0) / 10000
-        end
+        applyESXStatus('stress', status)
     end)
 
     return found
@@ -502,9 +603,14 @@ local function refreshNeedsFromQBMeta()
 end
 
 local function refreshFrameworkNeeds()
-    if not isPlayerLoaded() then return end
+    ensureFrameworkReady()
+
+    if Framework ~= 'ESX' and not isPlayerLoaded() then return end
 
     if Framework == 'ESX' then
+        -- Do not block status refresh forever when this resource started before ESX finished loading.
+        if not ESX then return end
+
         local updated = refreshNeedsFromESXStatus()
 
         if not updated then
@@ -530,6 +636,14 @@ end
 SetPedConfigFlag(PlayerPedId(), 32, true)
 SetFlyThroughWindscreenParams(defaultEjectVelocity, defaultUnknownEjectVelocity, defaultUnknownModifier, defaultMinDamage)
 setupFramework()
+
+-- Keep retrying framework detection. This fixes startup order issues where bg_hud starts before ESX/esx_status.
+CreateThread(function()
+    while true do
+        ensureFrameworkReady()
+        Wait(1000)
+    end
+end)
 
 local function getVehicleData()
     local ped = PlayerPedId()
@@ -919,8 +1033,31 @@ CreateThread(function()
 end)
 
 RegisterNetEvent('esx:playerLoaded', function()
+    setupFramework()
+
     if Framework == 'ESX' then
         initializeHud()
+    end
+end)
+
+AddEventHandler('esx_status:onTick', function(statuses)
+    if Framework ~= 'ESX' then return end
+    if type(statuses) ~= 'table' then return end
+
+    local changed = false
+
+    for _, status in pairs(statuses) do
+        if type(status) == 'table' then
+            local name = status.name or status.label
+
+            if name == 'hunger' or name == 'thirst' or name == 'stress' then
+                changed = applyESXStatus(name, status) or changed
+            end
+        end
+    end
+
+    if changed then
+        sendHud()
     end
 end)
 
